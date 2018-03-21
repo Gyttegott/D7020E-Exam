@@ -27,6 +27,7 @@ object_index_current = 0
 tasks = []
 priorities = []
 interarrival = []
+wcet = []
 
 task_name = ""
 file_name = ""
@@ -249,7 +250,9 @@ def posted_event_init():
                     tasks[task_to_test] + "()")
 
     else:
-        """ here we are done, call your analysis here """
+        checkUtilizationFactor()
+        checkResponseTime()
+        checkExactResponseTime()
         offset = 1
         print("\nFinished all ktest files!\n")
         print("Claims:")
@@ -268,6 +271,177 @@ def posted_event_init():
         # comment out to prevent gdb from quit on finish, useful to debugging
         gdb.execute("quit")
 
+def checkUtilizationFactor():
+	global outputdata
+	global interarrival
+	global tasks
+	global wcet
+
+	print("\nChecking utilization factor!\n")
+
+	sortout = outputdata[:]
+	sortout = sorted(sortout, key=lambda task: (task[1], task[0]))
+	task = sortout[0][1]
+	highest = 0
+	wcet = [None]*len(tasks)
+
+	for index, obj in enumerate(sortout):
+		if not obj[1] == task:
+			wcet[tasks.index(task)]=highest
+			task = obj[1]
+			highest = obj[2]
+		elif highest < obj[2]:
+			highest = obj[2]
+	wcet[tasks.index(task)]=highest
+
+	ufact = 0
+	for index, obj in enumerate(wcet):
+		arrive = int(interarrival[index])
+		ufact = ufact + (int(obj)/arrive)
+		print("%s = %i/%i" % (tasks[index], obj, arrive))
+	print('------------\ntotal utilization factor: %.4f' % round(ufact,4))
+
+def checkResponseTime():
+	global outputdata
+	global interarrival
+	global tasks
+	global wcet
+
+	data = [] # strucuture: array of (task, wcet, interarrival, priority, [(ceiling, blocking-time)])
+
+	#Setup arrays for holding timestamps of 'enter' events and the total blocking time of resources.
+	enters = [] # structure: array of (resource, timestamp)
+	blocks = [] # structure: array of (resource, blocking time)
+	#sort the outputdata on event-name and secondly test-name
+	sortout = outputdata[:]
+	sortout = sorted(sortout, key=lambda task: (task[1], task[0]))
+	#loop through outputdata to find blocking time of resources for each task and then build up the array 'data'
+	for index, obj in enumerate(sortout):
+		if obj[4] == "Enter":
+			enters.append((obj[3], obj[2]))
+		elif obj[4] == "Exit":
+			#search enters to find corresponding 'enter' event, and search blocks to see if an existing resource block with lower blocking time needs overwriting
+			entindex = -1
+			for eindex, enter in enumerate(enters):
+				if enter[0] == obj[3]:
+					entindex = eindex
+			bloindex = -1
+			for bindex, block in enumerate(blocks):
+				if block[0] == obj[3] and block[1] < (obj[2]-enters[entindex][1]):
+					blocks[bindex] = (obj[3], obj[2]-enters[entindex][1])
+					bloindex = bindex
+			if bloindex == -1:
+				blocks.append((obj[3], obj[2]-enters[entindex][1]))
+			enters.pop(entindex)
+		elif obj[4] == "Finish" and (index == len(sortout)-1 or sortout[index+1][1] != obj[1]): #only run if its the last 'finish' for the current event
+			tindex = tasks.index(obj[1])
+			prio = 1
+			for arr in interarrival:
+				if int(interarrival[tindex]) < int(arr): #rate monotonic assignment - loop through interarrivals to set priority
+					prio += 1
+			#insert row in array 'data' and reset working arrays for the next task
+			data.append((obj[1], wcet[tindex], int(interarrival[tindex]), prio, blocks))
+			blocks = []
+			enters = []
+	
+	#sort 'data' based on priority descending to handle highest priority task first
+	data = sorted(data, key=lambda task: task[3], reverse=True)
+
+	print("\nChecking response times!\n")
+	for index, task in enumerate(data):
+		Bi = 0
+		for blocker in data: #loop through 'data' to find the highest blocking time on resource with ceiling >= current priority
+			if blocker[3] < task[3]:
+				for resource in blocker[4]:
+					if resource[0] >= task[3] and Bi < resource[1]:
+						Bi = resource[1]
+
+		Ii = 0
+		for preempt in data: #loop through 'data' and sum up the time being preempted by higher priority tasks
+			if preempt[3] > task[3]:
+				Ii += preempt[1] * (int(task[2] / preempt[2]) + (task[2] % preempt[2] > 0))
+
+		totalR = task[1] + Bi + Ii
+		print("%s: %s/%s - %s" % (task[0], totalR, task[2], "Success" if totalR < task[2] else "Failure"))
+
+def checkExactResponseTime():
+	global outputdata
+	global interarrival
+	global tasks
+	global wcet
+
+	data = [] # strucuture: array of (task, wcet, interarrival, priority, [(ceiling, blocking-time)])
+
+	#Setup arrays for holding timestamps of 'enter' events and the total blocking time of resources.
+	enters = [] # structure: array of (resource, timestamp)
+	blocks = [] # structure: array of (resource, blocking time)
+	#sort the outputdata on event-name and secondly test-name
+	sortout = outputdata[:]
+	sortout = sorted(sortout, key=lambda task: (task[1], task[0]))
+	#loop through outputdata to find blocking time of resources for each task and then build up the array 'data'
+	for index, obj in enumerate(sortout):
+		if obj[4] == "Enter":
+			enters.append((obj[3], obj[2]))
+		elif obj[4] == "Exit":
+			#search enters to find corresponding 'enter' event, and search blocks to see if an existing resource block with lower blocking time needs overwriting
+			entindex = -1
+			for eindex, enter in enumerate(enters):
+				if enter[0] == obj[3]:
+					entindex = eindex
+			bloindex = -1
+			for bindex, block in enumerate(blocks):
+				if block[0] == obj[3] and block[1] < (obj[2]-enters[entindex][1]):
+					blocks[bindex] = (obj[3], obj[2]-enters[entindex][1])
+					bloindex = bindex
+			if bloindex == -1:
+				blocks.append((obj[3], obj[2]-enters[entindex][1]))
+			enters.pop(entindex)
+		elif obj[4] == "Finish" and (index == len(sortout)-1 or sortout[index+1][1] != obj[1]): #only run if its the last 'finish' for the current event
+			tindex = tasks.index(obj[1])
+			prio = 1
+			for arr in interarrival:
+				if int(interarrival[tindex]) < int(arr): #rate monotonic assignment - loop through interarrivals to set priority
+					prio += 1
+			#insert row in array 'data' and reset working arrays for the next task
+			data.append((obj[1], wcet[tindex], int(interarrival[tindex]), prio, blocks))
+			blocks = []
+			enters = []
+	
+	#sort 'data' based on priority descending to handle highest priority task first
+	data = sorted(data, key=lambda task: task[3], reverse=True)
+
+	print("\nChecking exact response times!\n")
+	for index, task in enumerate(data):
+		Bi = 0
+		for blocker in data: #loop through 'data' to find the highest blocking time on resource with ceiling >= current priority
+			if blocker[3] < task[3]:
+				for resource in blocker[4]:
+					if resource[0] >= task[3] and Bi < resource[1]:
+						Bi = resource[1]
+
+		Ii = 0
+		Icount = [] #structure: array of (index in data, Interference count
+		for index, preempt in enumerate(data): #loop through 'data' and add index for task with higher priority
+			if preempt[3] > task[3]:
+				Icount.append((index, 0))
+
+		while task[1] + Bi + Ii < task[2]:
+			oldI = Ii #to check after each turn if additional interference is introduced
+			for index, interfere in enumerate(Icount):
+				#calculate the number of preemptions made by current task on the current total time
+				total = task[1]+Bi+Ii
+				ITask = data[interfere[0]]
+				newI = int(total / ITask[2]) + (total% ITask[2] > 0)
+				if newI > interfere[1]: # if more preemptions are made than previous turn, add the missing time to Ii and save the preemptions count
+					Ii += (newI - interfere[1])*ITask[1]
+					Icount[index] = (interfere[0], newI)
+			if Ii == oldI: #stop if no new preemptions are introduced
+				break;
+				
+
+		totalR = task[1] + Bi + Ii
+		print("%s: %s%s/%s - %s" % (task[0], ">= " if totalR > task[2] else "", totalR, task[2], "Success" if totalR < task[2] else "Failure"))
+			
 
 def trimZeros(str):
     for i in range(len(str))[::-1]:
